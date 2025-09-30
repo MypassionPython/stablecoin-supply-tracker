@@ -8,13 +8,10 @@ import requests
 
 LLAMA_STABLES_URL = "https://stablecoins.llama.fi/stablecoins?includePrices=true"
 
-# Токени/чейни, які трекаємо
+# Що трекаємо
 TOKENS = {"USDT", "USDC", "DAI", "PYUSD"}
 
-# Канонічні назви, до яких зводимо варіації з API
-CANONICAL_CHAINS = {"Ethereum", "Arbitrum", "Base", "Optimism"}
-
-# Варіанти від DefiLlama → канон
+# Мапа альясів → канон
 CHAIN_ALIASES = {
     "ethereum": "Ethereum", "eth": "Ethereum",
     "arbitrum": "Arbitrum", "arbitrum one": "Arbitrum", "arb": "Arbitrum",
@@ -22,7 +19,7 @@ CHAIN_ALIASES = {
     "optimism": "Optimism", "op": "Optimism", "op mainnet": "Optimism",
 }
 
-def canon_chain(name: str):
+def canon_chain(name: str) -> str | None:
     if not name:
         return None
     key = str(name).strip().lower()
@@ -72,30 +69,50 @@ def extract_circulating_usd(entry: dict):
     return None
 
 def normalize(pegged_assets: list):
+    """
+    Формуємо рядки по всіх доступних мережах (без жорсткого фільтру),
+    плюс додаємо TOTAL по кожному токену для надійності.
+    """
     rows = []
+    totals = {}  # symbol -> sum
+
     for asset in pegged_assets:
         symbol = (asset.get("symbol") or "").upper()
         if TOKENS and symbol not in TOKENS:
             continue
+
         price_usd = last_price_usd(asset)
         chain_circ = asset.get("chainCirculating") or []
         if not isinstance(chain_circ, list) or not chain_circ:
             continue
+
         for e in chain_circ:
             if not isinstance(e, dict):
                 continue
-            ch = canon_chain(e.get("chain") or e.get("name"))
-            if ch not in CANONICAL_CHAINS:
-                continue
+            raw_chain = e.get("chain") or e.get("name")
+            ch = canon_chain(raw_chain) or "Unknown"
+
             val = extract_circulating_usd(e)
             if val is None:
                 continue
+
             rows.append({
                 "symbol": symbol,
                 "chain": ch,
                 "circulatingUsd": round(val, 2),
                 "priceUsd": price_usd
             })
+            totals[symbol] = totals.get(symbol, 0.0) + float(val)
+
+    # Додаємо підсумкові рядки TOTAL по кожному символу
+    for sym, total in sorted(totals.items()):
+        rows.append({
+            "symbol": sym,
+            "chain": "TOTAL",
+            "circulatingUsd": round(total, 2),
+            "priceUsd": None
+        })
+
     rows.sort(key=lambda r: (r["symbol"], r["chain"]))
     return rows
 
@@ -107,10 +124,7 @@ def write_snapshot(rows: list) -> pathlib.Path:
     payload = {
         "ts": dt.isoformat(timespec="seconds"),
         "source": "DefiLlama Stablecoins",
-        "filters": {
-            "tokens": sorted(list(TOKENS)),
-            "chains": sorted(list(CANONICAL_CHAINS))
-        },
+        "filters": {"tokens": sorted(list(TOKENS))},
         "rows": rows
     }
     outpath.write_text(json.dumps(payload, indent=2))

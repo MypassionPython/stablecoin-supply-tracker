@@ -26,11 +26,22 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Update data (create snapshot file)
-        run: python scripts/update.py
+        run: |
+          python -u scripts/update.py
+
+      - name: Debug workspace (list files)
+        run: |
+          echo "[debug] PWD=$(pwd)"
+          echo "[debug] repo root listing:"
+          ls -la
+          echo "[debug] data listing (if exists):"
+          ls -la data || true
+          echo "[debug] find data files:"
+          find data -maxdepth 2 -type f -print || true
 
       - name: Commit if changed (diff-guard) as YOU
         env:
-          # ЗАМІНИ на свій логін/ID no-reply цього акаунта:
+          # no-reply дані твого акаунта:
           GIT_AUTHOR_NAME: "MypassionPython"
           GIT_AUTHOR_EMAIL: "125153511+MypassionPython@users.noreply.github.com"
           GIT_COMMITTER_NAME: "MypassionPython"

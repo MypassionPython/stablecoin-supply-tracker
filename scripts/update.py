@@ -4,19 +4,31 @@ import pathlib
 import sys
 import time
 from datetime import datetime, timezone
-
 import requests
 
-# Публічне джерело з реальними даними (без ключів)
 LLAMA_STABLES_URL = "https://stablecoins.llama.fi/stablecoins?includePrices=true"
 
-# Що саме трекаємо
+# Токени/чейни, які трекаємо
 TOKENS = {"USDT", "USDC", "DAI", "PYUSD"}
-CHAINS = {"Ethereum", "Arbitrum", "Base", "Optimism"}  # можна розширити
 
+# Канонічні назви, до яких зводимо варіації з API
+CANONICAL_CHAINS = {"Ethereum", "Arbitrum", "Base", "Optimism"}
+
+# Варіанти від DefiLlama → канон
+CHAIN_ALIASES = {
+    "ethereum": "Ethereum", "eth": "Ethereum",
+    "arbitrum": "Arbitrum", "arbitrum one": "Arbitrum", "arb": "Arbitrum",
+    "base": "Base",
+    "optimism": "Optimism", "op": "Optimism", "op mainnet": "Optimism",
+}
+
+def canon_chain(name: str):
+    if not name:
+        return None
+    key = str(name).strip().lower()
+    return CHAIN_ALIASES.get(key, name)
 
 def fetch_llama_stables():
-    """Реальні дані з DefiLlama Stablecoins API з ретраями та базовою валідацією."""
     for attempt in range(3):
         try:
             r = requests.get(LLAMA_STABLES_URL, timeout=25)
@@ -25,16 +37,13 @@ def fetch_llama_stables():
             if isinstance(data, dict) and "peggedAssets" in data:
                 return data["peggedAssets"]
             raise ValueError("Unexpected response shape from DefiLlama")
-        except Exception as e:
+        except Exception:
             if attempt == 2:
-                # остання спроба — пробиваємо помилку, хай воркфлоу впаде і ти це побачиш
                 raise
             time.sleep(1 + attempt)
     return []
 
-
 def last_price_usd(asset: dict):
-    """Витягуємо останню відому ціну з масиву prices (якщо є)."""
     prices = asset.get("prices") or []
     if not prices:
         return None
@@ -43,86 +52,73 @@ def last_price_usd(asset: dict):
     except Exception:
         return None
 
+def extract_circulating_usd(entry: dict):
+    circ = entry.get("circulating")
+    if isinstance(circ, dict):
+        for k in ("peggedUSD", "peggedUsd", "usd", "value"):
+            v = circ.get(k)
+            if v is not None:
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    pass
+    for k in ("peggedUSD", "peggedUsd", "usd", "value", "circulating", "circulatingPrevDay"):
+        v = entry.get(k)
+        if v is not None:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                pass
+    return None
 
 def normalize(pegged_assets: list):
-    """
-    Агрегуємо circulating USD по вибраних чейнах для вибраних токенів.
-    Основне поле — asset['chainCirculating']: список об'єктів:
-      {"chain":"Ethereum","circulating":{"peggedUSD": ...}, ...}
-    """
     rows = []
     for asset in pegged_assets:
         symbol = (asset.get("symbol") or "").upper()
         if TOKENS and symbol not in TOKENS:
             continue
-
         price_usd = last_price_usd(asset)
         chain_circ = asset.get("chainCirculating") or []
-
         if not isinstance(chain_circ, list) or not chain_circ:
-            # немає поканальної розбивки — пропускаємо без помилки
             continue
-
-        for entry in chain_circ:
-            if not isinstance(entry, dict):
-                # іноді можуть трапитись рядки або інші типи — скіпаємо
+        for e in chain_circ:
+            if not isinstance(e, dict):
                 continue
-
-            chain_name = entry.get("chain") or entry.get("name")
-            if CHAINS and chain_name not in CHAINS:
+            ch = canon_chain(e.get("chain") or e.get("name"))
+            if ch not in CANONICAL_CHAINS:
                 continue
-
-            # Значення може лежати у різних ключах — беремо найтиповіші
-            val = None
-            circ = entry.get("circulating")
-            if isinstance(circ, dict):
-                val = (
-                    circ.get("peggedUSD")
-                    or circ.get("peggedUsd")
-                    or circ.get("usd")
-                    or circ.get("value")
-                )
+            val = extract_circulating_usd(e)
             if val is None:
-                # запасні варіанти
-                val = entry.get("circulating") or entry.get("circulatingPrevDay")
-
-            try:
-                circulating_usd = float(val)
-            except (TypeError, ValueError):
                 continue
-
             rows.append({
                 "symbol": symbol,
-                "chain": chain_name,
-                "circulatingUsd": round(circulating_usd, 2),
+                "chain": ch,
+                "circulatingUsd": round(val, 2),
                 "priceUsd": price_usd
             })
-
-    # стабільне сортування для читабельності
     rows.sort(key=lambda r: (r["symbol"], r["chain"]))
     return rows
 
-
 def write_snapshot(rows: list) -> pathlib.Path:
-    """Пише JSON-снапшот у data/YYYY-MM-DD/HHMMSS.json (завжди нове ім'я → завжди diff)."""
     dt = datetime.now(timezone.utc)
     folder = pathlib.Path("data") / dt.strftime("%Y-%m-%d")
     folder.mkdir(parents=True, exist_ok=True)
-
     outpath = folder / f"{dt.strftime('%H%M%S')}.json"
     payload = {
         "ts": dt.isoformat(timespec="seconds"),
         "source": "DefiLlama Stablecoins",
-        "filters": {"tokens": sorted(list(TOKENS)), "chains": sorted(list(CHAINS))},
+        "filters": {
+            "tokens": sorted(list(TOKENS)),
+            "chains": sorted(list(CANONICAL_CHAINS))
+        },
         "rows": rows
     }
     outpath.write_text(json.dumps(payload, indent=2))
     return outpath
 
-
 if __name__ == "__main__":
     raw = fetch_llama_stables()
     norm = normalize(raw)
     out = write_snapshot(norm)
-    print(f"[update.py] wrote file: {out}")
+    print(f"[update.py] wrote file: {out} (rows={len(norm)})")
     sys.exit(0)

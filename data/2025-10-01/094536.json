@@ -1,0 +1,13 @@
+{
+  "ts": "2025-10-01T09:45:36+00:00",
+  "source": "DefiLlama Stablecoins",
+  "filters": {
+    "tokens": [
+      "DAI",
+      "PYUSD",
+      "USDC",
+      "USDT"
+    ]
+  },
+  "rows": []
+}
